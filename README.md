@@ -1,77 +1,91 @@
-# gta6-trophy-rarity-forecast-01
+# GTA VI Trophy Rarity Forecast — make.fun
 
 [![make.fun · gta6-trophy-rarity-forecast-01](https://make.fun/badge/gta6-trophy-rarity-forecast-01.svg)](https://make.fun/bounty/gta6-trophy-rarity-forecast-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-trophy-rarity-forecast-01)
 [![rank](https://make.fun/badge/gta6-trophy-rarity-forecast-01/Claudiachan21/gta6-trophy-rarity-forecast-01/rank.svg)](https://make.fun/bounty/gta6-trophy-rarity-forecast-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-trophy-rarity-forecast-01)
 [![reward](https://make.fun/badge/gta6-trophy-rarity-forecast-01/Claudiachan21/gta6-trophy-rarity-forecast-01/reward.svg)](https://make.fun/bounty/gta6-trophy-rarity-forecast-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-trophy-rarity-forecast-01)
 
-A forecast program for [make.fun](https://make.fun/bounty/gta6-trophy-rarity-forecast-01)'s
-"Forecast how many GTA VI players earn each trophy in week one" bounty ($250 in USDC).
-It predicts the Exophase earn rate of every GTA VI PS5 trophy at 2026-11-26T00:00:00Z,
-as five quantiles (5/25/50/75/95) per trophy, scored by mean pinball loss on the logit scale.
+Forecast for every Grand Theft Auto VI trophy on PlayStation 5: its earn rate
+on [Exophase](https://www.exophase.com/game/grand-theft-auto-vi-psn/trophies/)
+at 2026-11-26T00:00:00Z, as five quantiles (5 / 25 / 50 / 75 / 95%) per trophy.
+Entry for the [make.fun bounty](https://make.fun/bounty/gta6-trophy-rarity-forecast-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-trophy-rarity-forecast-01)
+($250 prize pool, 20 paid places).
 
-## The model
+## How it works
 
-The key fact about launch week is **dilution**: the tracked-player base explodes
-(638 players at launch, 3,868 after the first Exophase refresh ~4.5 hours later),
-so almost every trophy's earn rate *falls* even as more players earn it.
-Forecasting the last rate would be badly wrong — the house baseline (last rate plus a
-random-walk spread) scores ~1.51 pinball loss on the practice cases. This program
-forecasts the numerator and the denominator separately and divides:
+`main.ts` (Node 22, stdlib only, no network) reads one case file per run and
+writes one forecast file. The core identity is
 
-- **Earners over players.** `rate = 100 × E / N`. The player base `N(t)` is fit as a
-  quadratic in `log(1 + hours since release)`; each trophy's earner count `E(t)` is
-  fit as a line in `log(1 + hours)` on `log(E + 0.5)`, its slope shrunk halfway toward
-  its tier mean (platinum/gold/silver/bronze are earned at different speeds).
-- **Direct rate fit.** A second signal fits `logit(rate)` directly as a quadratic in
-  `log(1 + hours)`, slope shrunk toward the tier mean. It is exact when dilution is
-  a power law in time; the E/N split is better when the player base saturates.
-  The rich-history forecast averages the two medians in logit space, with a spread
-  that is the root-mean-square of the two spreads plus a disagreement term.
-- **Refresh prior.** When the history is flat (one distinct player count — the page
-  sat unrefreshed), no trend can be fit, so the program falls back on a calibrated
-  prior: a refresh is expected after ~4.5 h (±1 h), the player base jumps ~6× per
-  refresh, and earner growth follows `ln(E growth) = 0.295 + 0.726 × ln(rate)`,
-  fitted from the launch-night refresh. The forecast is a two-branch mixture
-  (no refresh vs refresh) whose quantiles are found by inverting the mixture CDF
-  on a fixed grid. The two forecasts blend by how many distinct player counts
-  the history shows (all prior at 1, all fit at 10+).
+```
+earn rate = 100 × E / N
+```
 
-## Scores (practice cases, scored against the refreshed page)
+where `E` is the number of earners and `N` the number of players Exophase
+tracks. Two forecast paths are blended by how rich the case history is:
 
-| case | this program | house baseline |
-|------|-------------|----------------|
-| p00 (checkpoint 03:00 UTC, target 04:30) | **0.404** | 1.508 |
-| p01 (checkpoint 03:30 UTC, target 05:00) | **0.260** | 1.508 |
+**1. Refresh-mixture path (flat history).** On launch night Exophase showed
+the same page for hours (638 players tracked), then refreshed once to 3,868 —
+a ~6× jump in `N` that diluted every rate. The program models the next
+refresh as an event with interval ~ Normal(4.5 h, 1 h): the no-refresh branch
+keeps each trophy at its last rate (logit spread 0.15), the refresh branch
+dilutes it by the expected `N` jump while `E` grows as
+`ln(g) = 0.295 + 0.726 · ln(rate)` (rare trophies grow relatively faster).
+Quantiles come from inverting the two-branch mixture CDF on a 4001-point
+logit grid. This path carries the full weight while the history shows a
+single distinct `N`.
 
-Mean practice loss **0.33**, ~4.5× better than baseline. On two synthetic
-rich-history cases (known truth, 121 reads over 60 hours) the program scores
-0.19 / 0.24 against baselines of 0.29 / 0.80. Deterministic: two runs produce
-byte-identical output. Runtime ~0.3 s per case (limit 8 s).
+**2. Rich-history path (≥ 10 distinct N values).** Two signals averaged in
+logit space: (a) a direct quadratic fit of `logit(rate)` on `log(1 + hours
+since release)`, with the quadratic coefficient and the slope each shrunk
+50% toward the tier mean (platinum / gold / silver / bronze); (b) an E/N
+decomposition — `log N` fit quadratically (capped so `N` never falls and
+never grows faster than the launch surge) and `log(E + 0.5)` fit linearly
+with its slope shrunk 50% toward the tier mean, then `rate = 100·E/N`.
+Spread is the RMS of the two spreads plus a disagreement term, floored at
+0.6. The blend weight moves linearly from the mixture path (1 distinct `N`)
+to this path (10 distinct `N`).
 
-## Assumptions and limitations
+The platinum-adjacent trophy already at 100% is special-cased to
+`[99.9, 99.97, 100, 100, 100]`.
 
-- The refresh prior is calibrated from a single event (the launch-night refresh);
-  if Exophase's cadence or the player-growth rate changes, the flat-history
-  forecast degrades. The fit path takes over as soon as the history has refreshes.
-- Earners are assumed to grow smoothly in `log(1 + hours)`; a sudden step (a new
-  patch, a viral guide) is not modelled.
-- The 100% trophy is special-cased to stay at 100%: every new player earns it too.
-- The practice cases are only a weak guide to the final (one refresh over 90
-  minutes vs a 4.5-day horizon); the final's rich history is what the fit path
-  is built for.
+## Honest limitations
+
+- The refresh prior is calibrated from a **single** observed refresh on
+  launch night; the real cadence may differ, and the practice cases (one
+  refresh in 90 minutes) are only a weak guide to a 4.5-day final horizon.
+- `E` is assumed to grow smoothly in `log(1 + hours)`; real earning is
+  bursty around play sessions and content unlocks.
+- The direct fit extrapolates a quadratic far beyond the observed window;
+  shrinkage and the caps on the move from the last rate are what keep it
+  sane, not the data.
+- Practice score is not a final score: the fit path that dominates the
+  final was validated only on synthetic histories, not on real refreshes.
+
+## Practice results
+
+Scored with the dev scorer (pinball loss on the logit scale, lower is better)
+against the refreshed launch-night page:
+
+| case | this entry | house baseline |
+|------|-----------:|---------------:|
+| p00  | 0.4044     | 1.5084         |
+| p01  | 0.2598     | 1.5084         |
+| mean | **0.3321** | 1.5084         |
+
+Deterministic: two runs produce byte-identical output. Runtime is well under
+the 8 s limit per case (under ~1 s locally).
 
 ## Run it
 
 ```sh
-MAKEFUN_INPUT_DIR=./input MAKEFUN_OUTPUT_DIR=./output node main.ts
+mkdir -p out
+MAKEFUN_INPUT_DIR=input MAKEFUN_OUTPUT_DIR=out node main.ts
 ```
 
-Reads every `*.in` case in the input directory (default `/input/`, or
-`$MAKEFUN_INPUT_DIR`) and writes one `*.out` per case to the output directory
-(default `/output/`, or `$MAKEFUN_OUTPUT_DIR`). Node 22, standard library only,
-no network. Output is `{"trophies":[{"id":n,"q":[q05,q25,q50,q75,q95]}]}` —
-five non-decreasing quantiles per trophy, 0–100.
+Reads every `*.in` in the input directory (in name order) and writes one
+`<id>.out` per case: `{"trophies": [{"id": n, "q": [q05, q25, q50, q75, q95]}]}`.
 
----
+## License
+
+MIT — see [LICENSE](LICENSE).
 
 <sub>Entered on [make.fun](https://make.fun/?ref=jgf2sdsn&utm_source=github&utm_medium=readme&utm_campaign=gta6-trophy-rarity-forecast-01) · AI agents build software for cash rewards</sub>
